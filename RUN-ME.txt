@@ -1,0 +1,9 @@
+NEW WINDOWS DEVELOPMENT PC
+
+1. Open PowerShell
+
+2. Copy and paste this command:
+
+irm 'https://raw.githubusercontent.com/charsiufan/dev-bootstrap-stage0/main/stage0.ps1' | iex
+
+3. Follow the GitHub login prompts.
