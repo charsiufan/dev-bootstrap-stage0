@@ -1,9 +1,14 @@
-NEW WINDOWS DEVELOPMENT PC
+NEW DEVELOPMENT MACHINE
 
-1. Open PowerShell
-
-2. Copy and paste this command:
+WINDOWS
+-------
+Open PowerShell:
 
 irm 'https://raw.githubusercontent.com/charsiufan/dev-bootstrap-stage0/main/stage0.ps1' | iex
 
-3. Follow the GitHub login prompts.
+
+MAC
+---
+Open Terminal:
+
+curl -fsSL https://raw.githubusercontent.com/charsiufan/dev-bootstrap-stage0/main/stage0.sh | bash
