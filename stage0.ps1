@@ -161,7 +161,10 @@ Write-Host ""
 Write-Host "Starting main bootstrap..." -ForegroundColor Cyan
 Write-Host ""
 
-& $bootstrapScript
+& powershell.exe `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File $bootstrapScript
 
 if ($LASTEXITCODE -ne 0) {
     throw "Main bootstrap failed."
