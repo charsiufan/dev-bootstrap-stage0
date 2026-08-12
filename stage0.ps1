@@ -75,9 +75,12 @@ else {
 # GitHub authentication
 # ------------------------------------------------------------
 
-gh auth status --hostname github.com *> $null
+function Test-GitHubAuthentication {
+    cmd.exe /d /c "gh auth status --hostname github.com >nul 2>&1"
+    return ($LASTEXITCODE -eq 0)
+}
 
-if ($LASTEXITCODE -ne 0) {
+if (-not (Test-GitHubAuthentication)) {
     Write-Host ""
     Write-Host "[LOGIN]   GitHub authentication required." -ForegroundColor Yellow
     Write-Host "          A browser window will open for GitHub sign-in."
@@ -92,9 +95,7 @@ if ($LASTEXITCODE -ne 0) {
         throw "GitHub authentication was not completed."
     }
 
-    gh auth status --hostname github.com *> $null
-
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-GitHubAuthentication)) {
         throw "GitHub authentication could not be verified."
     }
 }
