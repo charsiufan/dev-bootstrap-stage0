@@ -75,11 +75,12 @@ else {
 # GitHub authentication
 # ------------------------------------------------------------
 
-& gh auth status --hostname github.com *> $null
+gh auth status --hostname github.com *> $null
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
-    Write-Host "GitHub authentication required." -ForegroundColor Yellow
+    Write-Host "[LOGIN]   GitHub authentication required." -ForegroundColor Yellow
+    Write-Host "          A browser window will open for GitHub sign-in."
     Write-Host ""
 
     gh auth login `
@@ -88,7 +89,13 @@ if ($LASTEXITCODE -ne 0) {
         --web
 
     if ($LASTEXITCODE -ne 0) {
-        throw "GitHub authentication failed."
+        throw "GitHub authentication was not completed."
+    }
+
+    gh auth status --hostname github.com *> $null
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub authentication could not be verified."
     }
 }
 
