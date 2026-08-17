@@ -57,6 +57,47 @@ function Test-Command {
     return $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
 }
 
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [string[]]$Arguments = @()
+    )
+
+    $standardOutputPath = [System.IO.Path]::GetTempFileName()
+    $standardErrorPath = [System.IO.Path]::GetTempFileName()
+    $previousErrorActionPreference = $ErrorActionPreference
+
+    try {
+        # File redirection avoids Windows PowerShell 5.1 promoting native stderr
+        # into the output stream. Continue prevents its ErrorRecord wrapper from
+        # terminating the script; the native exit code remains authoritative.
+        $ErrorActionPreference = "Continue"
+        & $Command @Arguments 1> $standardOutputPath 2> $standardErrorPath
+        $exitCode = $LASTEXITCODE
+        $standardOutput = @(Get-Content -LiteralPath $standardOutputPath -ErrorAction SilentlyContinue)
+        $standardError = @(Get-Content -LiteralPath $standardErrorPath -ErrorAction SilentlyContinue)
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Remove-Item -LiteralPath $standardOutputPath, $standardErrorPath -Force -ErrorAction SilentlyContinue
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        StandardOutput = @($standardOutput)
+        StandardError = @($standardError)
+        Output = @($standardOutput) + @($standardError)
+    }
+}
+
+function Format-NativeCommandOutput {
+    param([object[]]$Output)
+
+    return (($Output | ForEach-Object { "$_" }) -join "`n").Trim()
+}
+
 function ConvertTo-DriveLetter {
     param([string]$Value)
 
@@ -189,16 +230,24 @@ function Get-BootstrapBranches {
         [string]$Repository
     )
 
-    $defaultBranch = & gh repo view $Repository --json defaultBranchRef --jq ".defaultBranchRef.name" 2>$null
+    $defaultBranchResult = Invoke-NativeCommand -Command "gh" -Arguments @(
+        "repo", "view", $Repository, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"
+    )
+    $defaultBranch = @($defaultBranchResult.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) | Select-Object -First 1
 
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$defaultBranch")) {
-        throw "Could not determine the default branch for $Repository."
+    if ($defaultBranchResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace("$defaultBranch")) {
+        $details = Format-NativeCommandOutput -Output $defaultBranchResult.Output
+        throw "Could not determine the default branch for $Repository. $details".Trim()
     }
 
-    $branchNames = @(& gh api --paginate "repos/$Repository/branches" --jq ".[].name" 2>$null)
+    $branchResult = Invoke-NativeCommand -Command "gh" -Arguments @(
+        "api", "--paginate", "repos/$Repository/branches", "--jq", ".[].name"
+    )
+    $branchNames = @($branchResult.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
 
-    if ($LASTEXITCODE -ne 0 -or $branchNames.Count -eq 0) {
-        throw "Could not retrieve branches for $Repository."
+    if ($branchResult.ExitCode -ne 0 -or $branchNames.Count -eq 0) {
+        $details = Format-NativeCommandOutput -Output $branchResult.Output
+        throw "Could not retrieve branches for $Repository. $details".Trim()
     }
 
     $orderedBranches = @("$defaultBranch")
@@ -226,9 +275,9 @@ function Resolve-BootstrapBranch {
     $branchInfo = Get-BootstrapBranches -Repository $Repository
 
     if (-not [string]::IsNullOrWhiteSpace($RequestedBranch)) {
-        & git check-ref-format --branch $RequestedBranch *> $null
+        $branchCheck = Invoke-NativeCommand -Command "git" -Arguments @("check-ref-format", "--branch", $RequestedBranch)
 
-        if ($LASTEXITCODE -ne 0) {
+        if ($branchCheck.ExitCode -ne 0) {
             throw "Invalid Git branch name: $RequestedBranch"
         }
 
@@ -237,6 +286,10 @@ function Resolve-BootstrapBranch {
         }
 
         return $RequestedBranch
+    }
+
+    if ($branchInfo.Names.Count -eq 1) {
+        return $branchInfo.Names[0]
     }
 
     Write-Host "Bootstrap branch"
@@ -285,8 +338,8 @@ function Test-GitRepository {
         return $false
     }
 
-    & git -C $Path rev-parse --git-dir *> $null
-    return $LASTEXITCODE -eq 0
+    $repositoryCheck = Invoke-NativeCommand -Command "git" -Arguments @("-C", $Path, "rev-parse", "--git-dir")
+    return $repositoryCheck.ExitCode -eq 0
 }
 
 function Test-PermanentCloneFailure {
@@ -375,15 +428,14 @@ function Invoke-GitHubClone {
             $cloneArguments += $GitArguments
         }
 
-        $cloneOutput = @(& gh @cloneArguments 2>&1)
-        $cloneExitCode = $LASTEXITCODE
+        $cloneResult = Invoke-NativeCommand -Command "gh" -Arguments $cloneArguments
 
-        if ($cloneExitCode -eq 0 -and (Test-GitRepository -Path $Destination)) {
+        if ($cloneResult.ExitCode -eq 0 -and (Test-GitRepository -Path $Destination)) {
             return $true
         }
 
         $createdByCurrentAttempt = Test-Path -LiteralPath $Destination
-        $failureMessage = ($cloneOutput | ForEach-Object { "$_" }) -join "`n"
+        $failureMessage = Format-NativeCommandOutput -Output $cloneResult.Output
         $cleanupSucceeded = Remove-PartialCloneDestination `
             -Destination $Destination `
             -DestinationRoot $DestinationRoot `
@@ -456,6 +508,10 @@ if (-not (Test-Command "git")) {
             --accept-source-agreements `
             --accept-package-agreements
 
+        if ($LASTEXITCODE -ne 0) {
+            throw "Git installation failed with exit code $LASTEXITCODE."
+        }
+
         Update-Path
     }
 }
@@ -481,6 +537,10 @@ if (-not (Test-Command "gh")) {
             --accept-source-agreements `
             --accept-package-agreements
 
+        if ($LASTEXITCODE -ne 0) {
+            throw "GitHub CLI installation failed with exit code $LASTEXITCODE."
+        }
+
         Update-Path
     }
 }
@@ -495,9 +555,9 @@ else {
 $githubAuthenticated = $false
 
 if (Test-Command "gh") {
-    & gh auth status --hostname github.com *> $null
+    $authenticationCheck = Invoke-NativeCommand -Command "gh" -Arguments @("auth", "status", "--hostname", "github.com")
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($authenticationCheck.ExitCode -ne 0) {
         if ($DryRun) {
             Write-Host "[DRY-RUN] Would request interactive GitHub authentication." -ForegroundColor Yellow
         }
