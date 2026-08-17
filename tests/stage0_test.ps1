@@ -21,8 +21,18 @@ $stage0Ast = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 
 Assert-True ($parseErrors.Count -eq 0) "stage0.ps1 contains PowerShell parse errors."
+Assert-True ($null -eq ($stage0Ast.ParamBlock.Parameters.Attributes | Where-Object {
+    $_.TypeName.FullName -eq "ValidateScript"
+})) "The optional Branch parameter must not use ValidateScript."
+
+$parameterBindingScript = [scriptblock]::Create(
+    "$($stage0Ast.ParamBlock.Extent.Text)`n`$PSBoundParameters.ContainsKey('Branch')"
+)
+Assert-True (-not (& $parameterBindingScript)) "Omitting Branch failed parameter binding."
+Assert-True (& $parameterBindingScript -Branch "main") "Supplying Branch main failed parameter binding."
 
 $functionNames = @(
+    "Assert-BootstrapBranchParameter",
     "Invoke-NativeCommand",
     "Format-NativeCommandOutput",
     "Get-BootstrapBranches",
@@ -39,6 +49,19 @@ foreach ($functionName in $functionNames) {
     Assert-True ($null -ne $definition) "Missing function: $functionName"
     Invoke-Expression $definition.Extent.Text
 }
+
+Assert-BootstrapBranchParameter -WasSupplied $false -Value $null
+Assert-BootstrapBranchParameter -WasSupplied $true -Value "main"
+
+$emptyBranchRejected = $false
+try {
+    Assert-BootstrapBranchParameter -WasSupplied $true -Value "   "
+}
+catch {
+    $emptyBranchRejected = $_.Exception.Message -match "non-empty Git branch name"
+}
+
+Assert-True $emptyBranchRejected "An explicitly supplied blank Branch was not rejected."
 
 $success = Invoke-NativeCommand -Command "cmd.exe" -Arguments @(
     "/d",
@@ -83,11 +106,35 @@ $branches = Get-BootstrapBranches -Repository "owner/repository"
 Assert-True ($branches.Names.Count -eq 1) "Blank branch names were not filtered."
 Assert-True ($branches.Names[0] -ceq "main") "The valid branch name was not trimmed."
 
+$requestedBranch = Resolve-BootstrapBranch -RequestedBranch "main" -Repository "owner/repository"
+Assert-True ($requestedBranch -ceq "main") "An explicitly supplied valid Branch was not accepted."
+
 function Read-Host {
     throw "A menu was shown for a sole valid branch."
 }
 
 $selectedBranch = Resolve-BootstrapBranch -Repository "owner/repository"
 Assert-True ($selectedBranch -ceq "main") "The sole valid branch was not selected automatically."
+
+function Get-BootstrapBranches {
+    param([string]$Repository)
+
+    return [pscustomobject]@{
+        Default = "main"
+        Names = @("main", "release")
+    }
+}
+
+$script:branchSelectionPrompt = $null
+function Read-Host {
+    param([string]$Prompt)
+
+    $script:branchSelectionPrompt = $Prompt
+    return "2"
+}
+
+$selectedBranch = Resolve-BootstrapBranch -Repository "owner/repository"
+Assert-True ($branchSelectionPrompt -eq "Select branch [1]") "Multiple branches did not display the selection prompt."
+Assert-True ($selectedBranch -ceq "release") "Multiple-branch numeric selection did not resolve correctly."
 
 Write-Host "[OK] Stage 0 Windows native-command and branch-selection tests."

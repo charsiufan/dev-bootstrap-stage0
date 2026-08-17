@@ -5,13 +5,6 @@ param(
 
     [string]$DataDrive,
 
-    [ValidateScript({
-        if ([string]::IsNullOrWhiteSpace($_)) {
-            throw "Branch must be a non-empty Git branch name."
-        }
-
-        return $true
-    })]
     [string]$Branch
 )
 
@@ -56,6 +49,21 @@ function Test-Command {
 
     return $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
 }
+
+function Assert-BootstrapBranchParameter {
+    param(
+        [bool]$WasSupplied,
+        [string]$Value
+    )
+
+    if ($WasSupplied -and [string]::IsNullOrWhiteSpace($Value)) {
+        throw "Branch must be a non-empty Git branch name."
+    }
+}
+
+Assert-BootstrapBranchParameter `
+    -WasSupplied $PSBoundParameters.ContainsKey("Branch") `
+    -Value $Branch
 
 function Invoke-NativeCommand {
     param(
@@ -247,7 +255,7 @@ function Get-BootstrapBranches {
 
     if ($branchResult.ExitCode -ne 0 -or $branchNames.Count -eq 0) {
         $details = Format-NativeCommandOutput -Output $branchResult.Output
-        throw "Could not retrieve branches for $Repository. $details".Trim()
+        throw "Could not retrieve any valid branches for $Repository. $details".Trim()
     }
 
     $orderedBranches = @("$defaultBranch")
