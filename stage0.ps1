@@ -65,6 +65,62 @@ Assert-BootstrapBranchParameter `
     -WasSupplied $PSBoundParameters.ContainsKey("Branch") `
     -Value $Branch
 
+function ConvertTo-NativeCommandLineArgument {
+    param([AllowNull()][string]$Value)
+
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        return '""'
+    }
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $quotedValue = New-Object System.Text.StringBuilder
+    [void]$quotedValue.Append('"')
+    $backslashCount = 0
+
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+        }
+        elseif ($character -eq '"') {
+            if ($backslashCount -gt 0) {
+                [void]$quotedValue.Append('\', $backslashCount * 2)
+            }
+
+            [void]$quotedValue.Append('\')
+            [void]$quotedValue.Append('"')
+            $backslashCount = 0
+        }
+        else {
+            if ($backslashCount -gt 0) {
+                [void]$quotedValue.Append('\', $backslashCount)
+                $backslashCount = 0
+            }
+
+            [void]$quotedValue.Append($character)
+        }
+    }
+
+    if ($backslashCount -gt 0) {
+        [void]$quotedValue.Append('\', $backslashCount * 2)
+    }
+
+    [void]$quotedValue.Append('"')
+    return $quotedValue.ToString()
+}
+
+function ConvertTo-NativeCommandOutputLines {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return @()
+    }
+
+    return @($Text -split "`r?`n")
+}
+
 function Invoke-NativeCommand {
     param(
         [Parameter(Mandatory = $true)]
@@ -73,23 +129,33 @@ function Invoke-NativeCommand {
         [string[]]$Arguments = @()
     )
 
-    $standardOutputPath = [System.IO.Path]::GetTempFileName()
-    $standardErrorPath = [System.IO.Path]::GetTempFileName()
-    $previousErrorActionPreference = $ErrorActionPreference
-
     try {
-        # File redirection avoids Windows PowerShell 5.1 promoting native stderr
-        # into the output stream. Continue prevents its ErrorRecord wrapper from
-        # terminating the script; the native exit code remains authoritative.
-        $ErrorActionPreference = "Continue"
-        & $Command @Arguments 1> $standardOutputPath 2> $standardErrorPath
-        $exitCode = $LASTEXITCODE
-        $standardOutput = @(Get-Content -LiteralPath $standardOutputPath -ErrorAction SilentlyContinue)
-        $standardError = @(Get-Content -LiteralPath $standardErrorPath -ErrorAction SilentlyContinue)
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $Command
+        $startInfo.Arguments = (($Arguments | ForEach-Object {
+            ConvertTo-NativeCommandLineArgument -Value $_
+        }) -join " ")
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        [void]$process.Start()
+
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+
+        $exitCode = $process.ExitCode
+        $standardOutput = ConvertTo-NativeCommandOutputLines -Text $standardOutputTask.Result
+        $standardError = ConvertTo-NativeCommandOutputLines -Text $standardErrorTask.Result
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        Remove-Item -LiteralPath $standardOutputPath, $standardErrorPath -Force -ErrorAction SilentlyContinue
+    catch {
+        $exitCode = -1
+        $standardOutput = @()
+        $standardError = @($_.Exception.Message)
     }
 
     return [pscustomobject]@{
@@ -98,6 +164,34 @@ function Invoke-NativeCommand {
         StandardError = @($standardError)
         Output = @($standardOutput) + @($standardError)
     }
+}
+
+function Invoke-GitHubMetadataCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $maximumAttempts = 3
+
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+        $result = Invoke-NativeCommand -Command "gh" -Arguments $Arguments
+
+        if ($result.ExitCode -eq 0) {
+            return $result
+        }
+
+        if ($attempt -lt $maximumAttempts) {
+            $nextAttempt = $attempt + 1
+            Write-Host "[RETRY]   $Description failed; retrying ($nextAttempt/$maximumAttempts)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+
+    return $result
 }
 
 function Format-NativeCommandOutput {
@@ -238,8 +332,8 @@ function Get-BootstrapBranches {
         [string]$Repository
     )
 
-    $defaultBranchResult = Invoke-NativeCommand -Command "gh" -Arguments @(
-        "repo", "view", $Repository, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"
+    $defaultBranchResult = Invoke-GitHubMetadataCommand -Description "Default branch lookup" -Arguments @(
+        "api", "repos/$Repository", "--jq", ".default_branch"
     )
     $defaultBranch = @($defaultBranchResult.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) | Select-Object -First 1
 
@@ -248,8 +342,8 @@ function Get-BootstrapBranches {
         throw "Could not determine the default branch for $Repository. $details".Trim()
     }
 
-    $branchResult = Invoke-NativeCommand -Command "gh" -Arguments @(
-        "api", "--paginate", "repos/$Repository/branches", "--jq", ".[].name"
+    $branchResult = Invoke-GitHubMetadataCommand -Description "Branch discovery" -Arguments @(
+        "api", "repos/$Repository/branches", "--paginate", "--jq", ".[].name"
     )
     $branchNames = @($branchResult.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
 

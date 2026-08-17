@@ -33,7 +33,10 @@ Assert-True (& $parameterBindingScript -Branch "main") "Supplying Branch main fa
 
 $functionNames = @(
     "Assert-BootstrapBranchParameter",
+    "ConvertTo-NativeCommandLineArgument",
+    "ConvertTo-NativeCommandOutputLines",
     "Invoke-NativeCommand",
+    "Invoke-GitHubMetadataCommand",
     "Format-NativeCommandOutput",
     "Get-BootstrapBranches",
     "Resolve-BootstrapBranch"
@@ -72,6 +75,7 @@ $success = Invoke-NativeCommand -Command "cmd.exe" -Arguments @(
 Assert-True ($success.ExitCode -eq 0) "stderr from a successful native command was treated as failure."
 Assert-True (($success.StandardOutput | ForEach-Object { "$($_.Trim())" }) -contains "stdout-success") "Successful native stdout was not preserved."
 Assert-True (("$($success.StandardError -join "`n")") -match "stderr-success") "Successful native stderr was not preserved."
+Assert-True (("$($success.StandardError -join "`n")") -notmatch "NativeCommandError") "Native stderr was decorated with PowerShell error metadata."
 
 $failure = Invoke-NativeCommand -Command "cmd.exe" -Arguments @(
     "/d",
@@ -82,29 +86,119 @@ $failure = Invoke-NativeCommand -Command "cmd.exe" -Arguments @(
 Assert-True ($failure.ExitCode -eq 23) "A nonzero native exit code was not preserved."
 Assert-True (("$($failure.StandardError -join "`n")") -match "stderr-failure") "Failed native stderr was not preserved."
 
+$script:metadataCallCount = 0
+function Start-Sleep {
+    param([int]$Seconds)
+}
+
 function Invoke-NativeCommand {
     param([string]$Command, [string[]]$Arguments)
 
-    if ($Arguments[0] -eq "repo") {
+    $script:metadataCallCount++
+    return [pscustomobject]@{
+        ExitCode = 0
+        StandardOutput = @("main")
+        StandardError = @()
+        Output = @("main")
+    }
+}
+
+$metadataResult = Invoke-GitHubMetadataCommand -Description "Test metadata" -Arguments @("api", "repos/owner/repository")
+Assert-True ($metadataResult.ExitCode -eq 0) "A successful metadata call did not succeed."
+Assert-True ($metadataCallCount -eq 1) "A successful metadata call was retried."
+
+$script:metadataCallCount = 0
+function Invoke-NativeCommand {
+    param([string]$Command, [string[]]$Arguments)
+
+    $script:metadataCallCount++
+    if ($metadataCallCount -eq 1) {
         return [pscustomobject]@{
-            ExitCode = 0
-            StandardOutput = @(" main ")
-            StandardError = @()
-            Output = @(" main ")
+            ExitCode = 1
+            StandardOutput = @()
+            StandardError = @("HTTP 503")
+            Output = @("HTTP 503")
         }
     }
 
     return [pscustomobject]@{
         ExitCode = 0
-        StandardOutput = @("", "   ", " main ", "")
+        StandardOutput = @("main")
         StandardError = @()
-        Output = @("", "   ", " main ", "")
+        Output = @("main")
+    }
+}
+
+$metadataResult = Invoke-GitHubMetadataCommand -Description "Test metadata" -Arguments @("api", "repos/owner/repository")
+Assert-True ($metadataResult.ExitCode -eq 0) "A temporary metadata failure did not recover."
+Assert-True ($metadataCallCount -eq 2) "A temporary metadata failure did not retry exactly once."
+
+$script:metadataCallCount = 0
+function Invoke-NativeCommand {
+    param([string]$Command, [string[]]$Arguments)
+
+    $script:metadataCallCount++
+    return [pscustomobject]@{
+        ExitCode = 1
+        StandardOutput = @()
+        StandardError = @("HTTP 503")
+        Output = @("HTTP 503")
+    }
+}
+
+$metadataResult = Invoke-GitHubMetadataCommand -Description "Test metadata" -Arguments @("api", "repos/owner/repository")
+Assert-True ($metadataResult.ExitCode -ne 0) "A repeatedly failing metadata call was treated as success."
+Assert-True ($metadataCallCount -eq 3) "A repeatedly failing metadata call did not stop after three attempts."
+
+$script:metadataCallCount = 0
+function Invoke-NativeCommand {
+    param([string]$Command, [string[]]$Arguments)
+
+    $script:metadataCallCount++
+    return [pscustomobject]@{
+        ExitCode = 1
+        StandardOutput = @()
+        StandardError = @("HTTP 503 final response")
+        Output = @("HTTP 503 final response")
+    }
+}
+
+$discoveryFailureReported = $false
+try {
+    Get-BootstrapBranches -Repository "owner/repository"
+}
+catch {
+    $discoveryFailureReported = $_.Exception.Message -match "Could not determine the default branch" -and
+        $_.Exception.Message -match "HTTP 503 final response"
+}
+
+Assert-True $discoveryFailureReported "Exhausted default branch discovery did not report the final GitHub response."
+Assert-True ($metadataCallCount -eq 3) "Default branch discovery did not retry three times."
+
+function Invoke-NativeCommand {
+    param([string]$Command, [string[]]$Arguments)
+
+    if ($Arguments[1] -like "*/branches") {
+        return [pscustomobject]@{
+            ExitCode = 0
+            StandardOutput = @("", "   ", " main ", "")
+            StandardError = @()
+            Output = @("", "   ", " main ", "")
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = 0
+        StandardOutput = @(" main ")
+        StandardError = @()
+        Output = @(" main ")
     }
 }
 
 $branches = Get-BootstrapBranches -Repository "owner/repository"
 Assert-True ($branches.Names.Count -eq 1) "Blank branch names were not filtered."
 Assert-True ($branches.Names[0] -ceq "main") "The valid branch name was not trimmed."
+Assert-True ($branches.Default -ceq "main") "The reported default branch was not parsed."
 
 $requestedBranch = Resolve-BootstrapBranch -RequestedBranch "main" -Repository "owner/repository"
 Assert-True ($requestedBranch -ceq "main") "An explicitly supplied valid Branch was not accepted."
