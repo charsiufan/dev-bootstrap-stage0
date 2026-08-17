@@ -742,11 +742,11 @@ elseif (Test-Path $bootstrapPath) {
 }
 else {
     if ($DryRun) {
-        Write-Host "[DRY-RUN] Would clone $bootstrapRepository branch '$selectedBootstrapBranch'" -ForegroundColor Green
+        Write-Host "[DRY-RUN] Would clone $bootstrapRepository branch '$selectedBootstrapBranch'" -ForegroundColor Yellow
         Write-Host "          -> $bootstrapPath" -ForegroundColor Yellow
     }
     else {
-        Write-Host "[CLONE]   $bootstrapRepository branch '$selectedBootstrapBranch'" -ForegroundColor Green
+        Write-Host "[CLONE]   $bootstrapRepository branch '$selectedBootstrapBranch'" -ForegroundColor Yellow
 
         $cloneSucceeded = Invoke-GitHubClone `
             -Repository $bootstrapRepository `
